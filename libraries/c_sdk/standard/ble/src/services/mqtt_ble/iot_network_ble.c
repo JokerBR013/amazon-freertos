@@ -24,16 +24,23 @@
  */
 
 /**
- * @file iot_ble_network.c
- * @brief Implementation of Network Interface for BLE using Data transfer service.
+ * @file iot_network_ble.c
+ * @brief Implementation of network interface for BLE. This implementation is provided as a SHIM
+ * layer of backwards compatibility for the V4 MQTT library.
  */
 
 #include  <stdbool.h>
+
+/* Config files needs to be defined first. */
 #include "iot_config.h"
 #include "iot_ble_config.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "stream_buffer.h"
+
 #include "platform/iot_network_ble.h"
-#include "platform/iot_threads.h"
 #include "iot_ble_data_transfer.h"
+#include "iot_ble_mqtt_transport.h"
 
 /* Configure logs for the functions in this file. */
 #ifdef IOT_LOG_LEVEL_GLOBAL
@@ -45,35 +52,83 @@
 #define LIBRARY_LOG_NAME         ( "NET_BLE" )
 #include "iot_logging_setup.h"
 
-#define _CONTAINER( type, pConnection, channelName )    ( ( type * ) ( void * ) ( ( ( uint8_t * ) ( pConnection ) ) - offsetof( type, channelName ) ) )
-
-
 /**
  * @brief Structure holds the context associated with a ble connection.
  */
-typedef struct _bleNetworkConnection
+typedef struct IotBleNetworkConnection
 {
-    IotBleDataTransferChannel_t * pChannel;
-    IotSemaphore_t ready;
-    IotNetworkReceiveCallback_t pCallback;
-    void * pContext;
-} _bleNetworkConnection_t;
+    NetworkContext_t xContext;                  /* Network Context structure to hold the ble transport channel */
+    IotNetworkReceiveCallback_t pCallback;     /* Callback registered by user to get notified of receipt of new data. */
+    void * pUserContext;                       /* User context associated with the callback registered. */
+    SemaporeHandle_t xChannelOpened;           /* Semaphore to wait on if the BLE transfer channel is opened. */
+} IotBleNetworkConnection_t;
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::create using
+ * transport interface for BLE.
+ */
+static IotNetworkError_t IotNetworkBle_Create( void * pConnectionInfo,
+                                        void * pCredentialInfo,
+                                        void ** pConnection );
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::setReceiveCallback using
+ * transport interface for BLE.
+ */
+static IotNetworkError_t IotNetworkBle_SetReceiveCallback( void * pConnection,
+                                                    IotNetworkReceiveCallback_t receiveCallback,
+                                                    void * pContext );
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::send using
+ * transport interface for BLE.
+ */
+static size_t IotNetworkBle_Send( void * pConnection,
+                           const uint8_t * pMessage,
+                           size_t messageLength );
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::receive using
+ * transport interface for BLE.
+ */
+static size_t IotNetworkBle_Receive( void * pConnection,
+                              uint8_t * pBuffer,
+                              size_t bytesRequested );
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::close fusing
+ * transport interface for BLE.
+ */
+static IotNetworkError_t IotNetworkBle_Close( void * pConnection );
+
+/**
+ * @brief An implementation of #IotNetworkInterface_t::destroy using
+ * transport interface for BLE.
+ */
+static IotNetworkError_t IotNetworkBle_Destroy( void * pConnection );
+
 
 
 static void _callback( IotBleDataTransferChannelEvent_t event,
                        IotBleDataTransferChannel_t * pChannel,
                        void * pContext )
 {
-    _bleNetworkConnection_t * pBleConnection = ( _bleNetworkConnection_t * ) pContext;
+    IotBleNetworkConnection_t * pBleConnection = ( IotBleNetworkConnection_t * ) pContext;
+    MQTTStatus_t xStatus;
 
     switch( event )
     {
         case IOT_BLE_DATA_TRANSFER_CHANNEL_OPENED:
-            IotSemaphore_Post( &pBleConnection->ready );
+            xSemaphoreGive( pBLEConnection->xChannelOpened );
             break;
 
         case IOT_BLE_DATA_TRANSFER_CHANNEL_DATA_RECEIVED:
-            pBleConnection->pCallback( pBleConnection, pBleConnection->pContext );
+            xStatus = IotBleMqttTransportAcceptData( &pBleConnection->xContext );
+            configASSERT( xStatus == MQTTSuccess );
+            if( pBleConnection->pCallback != NULL )
+            {
+                pBleConnection->pCallback( pBleConnection, pBleConnection->pUserContext );
+            }
             break;
 
         default:
@@ -99,8 +154,7 @@ IotNetworkError_t IotNetworkBle_Create( void * pConnectionInfo,
                                         void ** pConnection )
 {
     IotNetworkError_t status = IOT_NETWORK_FAILURE;
-    IotBleDataTransferChannel_t * pChannel = NULL;
-    _bleNetworkConnection_t * pBleConnection = IotNetwork_Malloc( sizeof( _bleNetworkConnection_t ) );
+    IotBleNetworkConnection_t * pBleConnection = IotNetwork_Malloc( sizeof( IotBleNetworkConnection_t ) );
 
     /* Unused parameters */
     ( void ) pConnectionInfo;
@@ -108,7 +162,7 @@ IotNetworkError_t IotNetworkBle_Create( void * pConnectionInfo,
 
     if( pBleConnection != NULL )
     {
-        pChannel = IotBleDataTransfer_Open( IOT_BLE_DATA_TRANSFER_SERVICE_TYPE_MQTT );
+        pBleConnection->pChannel = IotBleDataTransfer_Open( IOT_BLE_DATA_TRANSFER_SERVICE_TYPE_MQTT );
 
         if( pChannel != NULL )
         {
