@@ -43,12 +43,8 @@
 #define IOT_NETWORK_INTERFACE_BLE    ( &( IotNetworkBle ) )
 
 /**
- * @cond DOXYGEN_IGNORE
- * Doxygen should ignore this section.
- *
- * Declaration of a network interface struct using the functions in this file.
+ * @brief Declaration of network interface for BLE.
  */
 extern const IotNetworkInterface_t IotNetworkBle;
-/** @endcond */
 
 #endif /* ifndef _IOT_NETWORK_BLE_H_ */
